@@ -53,6 +53,8 @@ static unsigned int unfocus_color;
 static void spawn(const Arg arg);
 static void kill_curr();
 static void add_window(Window w);
+static void client_to_workspace(const Arg arg);
+static void change_workspace(const Arg arg);
 
 // x events
 static void configurenotify(XEvent* e);
@@ -69,9 +71,23 @@ static void enternotify(XEvent* e);
 const char* dmenu_cmd[] = { "dmenu_run", NULL };
 const char* term_cmd[] = { "kitty", NULL };
 
+#define DESKTOPCHANGE(K, N)                               \
+    { MOD, K, change_workspace, { .workspace_idx = N } }, \
+        { MOD | ShiftMask, K, client_to_workspace, { .workspace_idx = N } },
+
 static Keybind keys[] = {
     { MOD | ShiftMask, XK_p, spawn, { .command = dmenu_cmd } },
     { MOD | ShiftMask, XK_l, kill_curr, { NULL } },
+    DESKTOPCHANGE(XK_0, 0)
+        DESKTOPCHANGE(XK_1, 1)
+            DESKTOPCHANGE(XK_2, 2)
+                DESKTOPCHANGE(XK_3, 3)
+                    DESKTOPCHANGE(XK_4, 4)
+                        DESKTOPCHANGE(XK_5, 5)
+                            DESKTOPCHANGE(XK_6, 6)
+                                DESKTOPCHANGE(XK_7, 7)
+                                    DESKTOPCHANGE(XK_8, 8)
+                                        DESKTOPCHANGE(XK_9, 9)
 };
 
 static void (*events[LASTEvent])(XEvent* e) = {
@@ -221,10 +237,59 @@ start(void)
 }
 
 static void
-go_workspace(int idx)
+remove_window(Window w)
+{
+    for (Client* cl = workspace_first; cl != NULL; cl = cl->next) {
+        if (cl->window == w) {
+            if (cl->prev == NULL && cl->next == NULL) {
+                free(workspace_first);
+                workspace_first = NULL;
+                workspace_curr = NULL;
+                return;
+            }
+
+            if (cl->prev == NULL) {
+                workspace_first = cl->next;
+                cl->next->prev = NULL;
+                workspace_curr = cl->next;
+            } else if (cl->next == NULL) {
+                cl->prev->next = NULL;
+                cl->next->prev = cl->prev;
+                workspace_curr = cl->prev;
+            } else {
+                cl->prev->next = cl->next;
+                cl->next->prev = cl->prev;
+                workspace_curr = cl->prev;
+            }
+        }
+    }
+}
+
+static void
+client_to_workspace(const Arg arg)
+{
+    Client* tmp = workspace_curr;
+    int tmp2 = arg.workspace_idx;
+
+    if (arg.workspace_idx == curr_workspace || workspace_curr == NULL)
+        return;
+
+    update_global(arg.workspace_idx);
+    add_window(tmp->window);
+    save_state(arg.workspace_idx);
+
+    update_global(tmp2);
+    remove_window(workspace_curr->window);
+
+    tile_screen();
+    update_curr();
+}
+
+static void
+change_workspace(const Arg arg)
 {
     // don't do anything if we're already in the correct workspace
-    if (idx == curr_workspace)
+    if (arg.workspace_idx == curr_workspace)
         return;
 
     // since the workspaces differ we want to unmap each window that is not currently
@@ -240,7 +305,7 @@ go_workspace(int idx)
     // we need to save the state that the workspace is in such that when we switch back
     // between workspaces the position of the windows stays the same.
     save_state(curr_workspace);
-    update_global(idx); // update the global state with the current workspace
+    update_global(arg.workspace_idx); // update the global state with the current workspace
 
     // map all of the windows that belong to the workspace that we switched to.
     if (workspace_first != NULL) {
@@ -249,6 +314,9 @@ go_workspace(int idx)
             XMapWindow(disp, cl->window);
         }
     }
+
+    tile_screen();
+    update_curr();
 }
 
 static void
@@ -335,35 +403,6 @@ enternotify(XEvent* e)
             workspace_curr = cl;
             update_curr();
             break;
-        }
-    }
-}
-
-static void
-remove_window(Window w)
-{
-    for (Client* cl = workspace_first; cl != NULL; cl = cl->next) {
-        if (cl->window == w) {
-            if (cl->prev == NULL && cl->next == NULL) {
-                free(workspace_first);
-                workspace_first = NULL;
-                workspace_curr = NULL;
-                return;
-            }
-
-            if (cl->prev == NULL) {
-                workspace_first = cl->next;
-                cl->next->prev = NULL;
-                workspace_curr = cl->next;
-            } else if (cl->next == NULL) {
-                cl->prev->next = NULL;
-                cl->next->prev = cl->prev;
-                workspace_curr = cl->prev;
-            } else {
-                cl->prev->next = cl->next;
-                cl->next->prev = cl->prev;
-                workspace_curr = cl->prev;
-            }
         }
     }
 }
