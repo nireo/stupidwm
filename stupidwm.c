@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -56,17 +57,25 @@ static void add_window(Window w);
 static void client_to_workspace(const Arg arg);
 static void change_workspace(const Arg arg);
 
+// bar related stuff
+static Window bar_window;
+static GC graphics_ctx;
+static int bar_height = 20;
+static const char* tags[] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "0" };
+
 // x events
-static void configurenotify(XEvent* e);
+static void
+configurenotify(XEvent* e);
 static void configurerequest(XEvent* e);
 static void keypress(XEvent* e);
 static void destroynotify(XEvent* e);
 static void maprequest(XEvent* e);
 static void enternotify(XEvent* e);
+static void expose(XEvent* e);
 
 #define FOCUS   "rgb:bc/57/66"
 #define UNFOCUS "rgb:88/88/88"
-#define MOD     Mod1Mask
+#define MOD     Mod4Mask
 
 const char* dmenu_cmd[] = { "dmenu_run", NULL };
 const char* term_cmd[] = { "kitty", NULL };
@@ -77,7 +86,8 @@ const char* term_cmd[] = { "kitty", NULL };
 
 static Keybind keys[] = {
     { MOD | ShiftMask, XK_p, spawn, { .command = dmenu_cmd } },
-    { MOD | ShiftMask, XK_l, kill_curr, { NULL } },
+    { MOD | ShiftMask, XK_q, kill_curr, { NULL } },
+    { MOD | ShiftMask, XK_Return, spawn, { .command = term_cmd } },
     DESKTOPCHANGE(XK_0, 0)
         DESKTOPCHANGE(XK_1, 1)
             DESKTOPCHANGE(XK_2, 2)
@@ -97,7 +107,56 @@ static void (*events[LASTEvent])(XEvent* e) = {
     [ConfigureNotify] = configurenotify,
     [ConfigureRequest] = configurerequest,
     [EnterNotify] = enternotify,
+    [Expose] = expose,
 };
+
+static void
+setup_bar(void)
+{
+    XSetWindowAttributes wa = {
+        .override_redirect = 1,
+        .background_pixel = unfocus_color,
+        .event_mask = ExposureMask,
+    };
+
+    bar_window = XCreateWindow(disp, rootwin,
+        0, 0, screen_width, bar_height, 0,
+        DefaultDepth(disp, main_screen),
+        CopyFromParent, DefaultVisual(disp, main_screen),
+        CWOverrideRedirect | CWBackPixel | CWEventMask, &wa);
+
+    graphics_ctx = XCreateGC(disp, bar_window, 0, NULL);
+    XMapWindow(disp, bar_window);
+}
+
+static void
+draw_bar(void)
+{
+    XSetForeground(disp, graphics_ctx, unfocus_color);
+    XFillRectangle(disp, bar_window, graphics_ctx, 0, 0, screen_width, bar_height);
+
+    int x = 0;
+    int tag_width = 20;
+
+    for (int i = 0; i < WORKSPACE_COUNT; i++) {
+        XSetForeground(disp, graphics_ctx, i == curr_workspace ? focus_color : unfocus_color);
+        XFillRectangle(disp, bar_window, graphics_ctx, x, 0, tag_width, bar_height);
+
+        XSetForeground(disp, graphics_ctx, i == curr_workspace ? unfocus_color : focus_color);
+        XDrawString(disp, bar_window, graphics_ctx, x + 5, bar_height - 5, tags[i], strlen(tags[i]));
+
+        x += tag_width;
+    }
+}
+
+static void
+expose(XEvent* e)
+{
+    XExposeEvent* ev = &e->xexpose;
+    if (ev->window == bar_window && ev->count == 0) {
+        draw_bar();
+    }
+}
 
 static void
 tile_screen(void)
@@ -107,14 +166,15 @@ tile_screen(void)
     // 2. there is a single window -> add space around the only window
     // 3. there are multiple windows -> count the amount of windows and divide the space evenly
     const int space = 10;
+    const int start_y = bar_height + space;
     if (workspace_first != NULL && workspace_first->next == NULL) {
         // special case there is only a single window
-        XMoveResizeWindow(disp, workspace_first->window, space, space, screen_width - 3 * space, screen_height - 3 * space);
+        XMoveResizeWindow(disp, workspace_first->window, space, start_y, screen_width - 3 * space, screen_height - 3 * space);
     } else if (workspace_first != NULL && workspace_first->next != NULL) { // multiple windows
         const int master_size = 0.55 * screen_width;
-        XMoveResizeWindow(disp, workspace_first->window, space, space, master_size, screen_height - 2 * space);
+        XMoveResizeWindow(disp, workspace_first->window, space, start_y, master_size, screen_height - 2 * space);
         int x = master_size + 3 * space;
-        int y = space;
+        int y = start_y;
         int tile_height = screen_width - master_size - 5 * space;
         int num_windows = 0;
 
@@ -317,6 +377,7 @@ change_workspace(const Arg arg)
 
     tile_screen();
     update_curr();
+    draw_bar();
 }
 
 static void
@@ -495,6 +556,7 @@ main(int argc, char* argv[])
     unfocus_color = get_color(UNFOCUS);
 
     setup_keybinds();
+    setup_bar();
 
     for (int i = 0; i < WORKSPACE_COUNT; ++i) {
         workspaces[i].first = NULL;
@@ -503,6 +565,8 @@ main(int argc, char* argv[])
 
     // make xorg send window management events to us.
     XSelectInput(disp, rootwin, SubstructureNotifyMask | SubstructureRedirectMask);
+
+    draw_bar();
 
     // start listening for XEvents
     start();
