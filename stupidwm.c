@@ -1,14 +1,30 @@
 #include <X11/X.h>
 #include <X11/Xlib.h>
 #include <X11/cursorfont.h>
+#include <X11/keysym.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/wait.h>
 #include <time.h>
+#include <unistd.h>
 
 #define WORKSPACE_COUNT 10
+
+// this is a generic argument to some functions we can use this to make defining keybinds a lot easier.
+// for example we want to give a workspace index or a command to a function.
+typedef union {
+    const char** command;
+    const int workspace_idx;
+} Arg;
+
+typedef struct {
+    unsigned int mod;
+    KeySym ks;
+    void (*function)(const Arg arg);
+    const Arg arg;
+} Keybind;
 
 typedef struct Client {
     struct Client* next;
@@ -37,6 +53,20 @@ static void destroynotify(XEvent* e);
 static void maprequest(XEvent* e);
 static Workspace workspaces[WORKSPACE_COUNT];
 static Cursor cursor;
+static unsigned int focus_color;
+static unsigned int unfocus_color;
+static void spawn(const Arg arg);
+static void add_window(Window w);
+
+#define FOCUS   "rgb:bc/57/66"
+#define UNFOCUS "rgb:88/88/88"
+#define MOD     Mod1Mask
+
+const char* dmenu_cmd[] = { "dmenu_run", NULL };
+
+static Keybind keys[] = {
+    { MOD | ShiftMask, XK_p, spawn, { .command = dmenu_cmd } },
+};
 
 static void (*events[LASTEvent])(XEvent* e) = {
     [KeyPress] = keypress,
@@ -45,6 +75,51 @@ static void (*events[LASTEvent])(XEvent* e) = {
     [ConfigureNotify] = configurenotify,
     [ConfigureRequest] = configurerequest,
 };
+
+static void
+tile_screen(void)
+{
+    // there are three different cases
+    // 1. there are no windows -> do nothing
+    // 2. there is a single window -> add space around the only window
+    // 3. there are multiple windows -> count the amount of windows and divide the space evenly
+    const int space = 10;
+    if (workspace_first != NULL && workspace_first->next == NULL) {
+        // special case there is only a single window
+        XMoveResizeWindow(disp, workspace_first->window, space, space, screen_width - 3 * space, screen_height - 3 * space);
+    } else if (workspace_first != NULL && workspace_first->next != NULL) { // multiple windows
+        const int master_size = 0.55 * screen_width;
+        XMoveResizeWindow(disp, workspace_first->window, space, space, master_size, screen_height - 2 * space);
+        int x = master_size + 3 * space;
+        int y = space;
+        int tile_height = screen_width - master_size - 5 * space;
+        int num_windows = 0;
+
+        for (Client* cl = workspace_first->next; cl != NULL; cl = cl->next) {
+            ++num_windows;
+        }
+
+        for (Client* cl = workspace_first->next; cl != NULL; cl = cl->next) {
+            XMoveResizeWindow(disp, cl->window, x, y, tile_height, (screen_height / num_windows) - 2 * space);
+            y += screen_height / num_windows;
+        }
+    }
+}
+
+static void
+update_curr(void)
+{
+    for (Client* cl = workspace_first; cl != NULL; cl = cl->next) {
+        if (workspace_curr == cl) {
+            XSetWindowBorderWidth(disp, cl->window, 5);
+            XSetWindowBorder(disp, cl->window, focus_color);
+            XSetInputFocus(disp, cl->window, RevertToParent, CurrentTime);
+            XRaiseWindow(disp, cl->window);
+        } else {
+            XSetWindowBorder(disp, cl->window, unfocus_color);
+        }
+    }
+}
 
 static void
 die(const char* e)
@@ -66,6 +141,48 @@ update_global(int idx)
     workspace_first = workspaces[idx].first;
     workspace_curr = workspaces[idx].curr;
     curr_workspace = idx;
+}
+
+// add window allocates a client and updates the global values
+static void
+add_window(Window w)
+{
+    Client* cl = calloc(1, sizeof(Client));
+    if (cl == NULL) {
+        die("failed calloc");
+    }
+
+    if (workspace_first == NULL) {
+        // there are no existing clients so update them
+        cl->next = NULL;
+        cl->prev = NULL;
+        cl->window = w;
+        workspace_first = cl;
+    } else {
+        Client* last;
+        for (last = workspace_first; last->next != NULL; last = last->next)
+            ;
+
+        cl->next = NULL;
+        cl->prev = last;
+        cl->window = w;
+        last->next = cl;
+    }
+
+    workspace_curr = cl;
+}
+
+unsigned long
+get_color(const char* color)
+{
+    XColor c;
+    Colormap map = DefaultColormap(disp, main_screen);
+
+    if (!XAllocNamedColor(disp, map, color, &c, &c)) {
+        die("error parsing color");
+    }
+
+    return c.pixel;
 }
 
 static void
@@ -134,8 +251,25 @@ maprequest(XEvent* e)
         }
     }
 
-    //  TODO: add window
+    add_window(event->window);
     XMapWindow(disp, event->window);
+    tile_screen();
+    update_curr();
+}
+
+static void
+spawn(const Arg arg)
+{
+    if (fork() == 0) {
+        if (fork() == 0) {
+            if (disp) {
+                close(ConnectionNumber(disp));
+            }
+            setsid();
+            execvp((char*)arg.command[0], (char**)arg.command);
+        }
+        exit(0);
+    }
 }
 
 static void
@@ -164,7 +298,15 @@ configurerequest(XEvent* e)
 static void
 keypress(XEvent* e)
 {
-    // TODO: special keybindings
+    XKeyEvent ev = e->xkey;
+    int ks_ret;
+    KeySym* ks = XGetKeyboardMapping(disp, ev.keycode, 1, &ks_ret);
+
+    for (int i = 0; i < (sizeof(keys) / sizeof(*keys)); ++i) {
+        if (keys[i].ks == *ks && keys[i].mod == ev.state) {
+            keys[i].function(keys[i].arg);
+        }
+    }
 }
 
 static void
@@ -190,31 +332,12 @@ destroynotify(XEvent* e)
 }
 
 static void
-tile_screen(void)
+setup_keybinds(void)
 {
-    // there are three different cases
-    // 1. there are no windows -> do nothing
-    // 2. there is a single window -> add space around the only window
-    // 3. there are multiple windows -> count the amount of windows and divide the space evenly
-    const int space = 10;
-    if (workspace_first != NULL && workspace_first->next == NULL) {
-        // special case there is only a single window
-        XMoveResizeWindow(disp, workspace_first->window, space, space, screen_width - 3 * space, screen_height - 3 * space);
-    } else if (workspace_first != NULL && workspace_first->next != NULL) { // multiple windows
-        const int master_size = 0.55 * screen_width;
-        XMoveResizeWindow(disp, workspace_first->window, space, space, master_size, screen_height - 2 * space);
-        int x = master_size + 3 * space;
-        int y = space;
-        int tile_height = screen_width - master_size - 5 * space;
-        int num_windows = 0;
-
-        for (Client* cl = workspace_first->next; cl != NULL; cl = cl->next) {
-            ++num_windows;
-        }
-
-        for (Client* cl = workspace_first->next; cl != NULL; cl = cl->next) {
-            XMoveResizeWindow(disp, cl->window, x, y, tile_height, (screen_height / num_windows) - 2 * space);
-            y += screen_height / num_windows;
+    for (int i = 0; i < (sizeof(keys) / sizeof(*keys)); ++i) {
+        KeySym ks = XKeysymToKeycode(disp, keys[i].ks);
+        if (ks) {
+            XGrabKey(disp, ks, keys[i].mod, rootwin, 1, GrabModeAsync, GrabModeAsync);
         }
     }
 }
@@ -239,6 +362,11 @@ main(int argc, char* argv[])
 
     cursor = XCreateFontCursor(disp, XC_left_ptr);
     XDefineCursor(disp, rootwin, cursor);
+
+    focus_color = get_color(FOCUS);
+    unfocus_color = get_color(UNFOCUS);
+
+    setup_keybinds();
 
     for (int i = 0; i < WORKSPACE_COUNT; ++i) {
         workspaces[i].first = NULL;
