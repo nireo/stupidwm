@@ -51,6 +51,7 @@ static Cursor cursor;
 static unsigned int focus_color;
 static unsigned int unfocus_color;
 static void spawn(const Arg arg);
+static void kill_curr();
 static void add_window(Window w);
 
 // x events
@@ -66,9 +67,11 @@ static void enternotify(XEvent* e);
 #define MOD     Mod1Mask
 
 const char* dmenu_cmd[] = { "dmenu_run", NULL };
+const char* term_cmd[] = { "kitty", NULL };
 
 static Keybind keys[] = {
     { MOD | ShiftMask, XK_p, spawn, { .command = dmenu_cmd } },
+    { MOD | ShiftMask, XK_l, kill_curr, { NULL } },
 };
 
 static void (*events[LASTEvent])(XEvent* e) = {
@@ -337,6 +340,35 @@ enternotify(XEvent* e)
 }
 
 static void
+remove_window(Window w)
+{
+    for (Client* cl = workspace_first; cl != NULL; cl = cl->next) {
+        if (cl->window == w) {
+            if (cl->prev == NULL && cl->next == NULL) {
+                free(workspace_first);
+                workspace_first = NULL;
+                workspace_curr = NULL;
+                return;
+            }
+
+            if (cl->prev == NULL) {
+                workspace_first = cl->next;
+                cl->next->prev = NULL;
+                workspace_curr = cl->next;
+            } else if (cl->next == NULL) {
+                cl->prev->next = NULL;
+                cl->next->prev = cl->prev;
+                workspace_curr = cl->prev;
+            } else {
+                cl->prev->next = cl->next;
+                cl->next->prev = cl->prev;
+                workspace_curr = cl->prev;
+            }
+        }
+    }
+}
+
+static void
 destroynotify(XEvent* e)
 {
     XDestroyWindowEvent* dwe = &e->xdestroywindow;
@@ -354,8 +386,38 @@ destroynotify(XEvent* e)
         return;
     }
 
-    // TODO: remove window
-    // TODO: tile
+    remove_window(dwe->window);
+    tile_screen();
+    update_curr();
+}
+
+static void
+send_kill_signal(Window w)
+{
+    XEvent ke;
+    ke.type = ClientMessage;
+    ke.xclient.window = w;
+    ke.xclient.message_type = XInternAtom(disp, "WM_PROTOCOLS", 1);
+    ke.xclient.format = 32;
+    ke.xclient.data.l[0] = XInternAtom(disp, "WM_DELETE_WINDOW", 1);
+    ke.xclient.data.l[1] = CurrentTime;
+    XSendEvent(disp, w, False, NoEventMask, &ke);
+}
+
+static void
+kill_curr(void)
+{
+    if (workspace_curr != NULL) {
+        XEvent ke;
+        ke.type = ClientMessage;
+        ke.xclient.window = workspace_curr->window;
+        ke.xclient.message_type = XInternAtom(disp, "WM_PROTOCOLS", True);
+        ke.xclient.format = 32;
+        ke.xclient.data.l[0] = XInternAtom(disp, "WM_DELETE_WINDOW", True);
+        ke.xclient.data.l[1] = CurrentTime;
+        XSendEvent(disp, workspace_curr->window, 0, NoEventMask, &ke);
+        send_kill_signal(workspace_curr->window);
+    }
 }
 
 static void
