@@ -46,17 +46,20 @@ static int screen_height;
 static int curr_workspace;
 static Client* workspace_first;
 static Client* workspace_curr;
-static void configurenotify(XEvent* e);
-static void configurerequest(XEvent* e);
-static void keypress(XEvent* e);
-static void destroynotify(XEvent* e);
-static void maprequest(XEvent* e);
 static Workspace workspaces[WORKSPACE_COUNT];
 static Cursor cursor;
 static unsigned int focus_color;
 static unsigned int unfocus_color;
 static void spawn(const Arg arg);
 static void add_window(Window w);
+
+// x events
+static void configurenotify(XEvent* e);
+static void configurerequest(XEvent* e);
+static void keypress(XEvent* e);
+static void destroynotify(XEvent* e);
+static void maprequest(XEvent* e);
+static void enternotify(XEvent* e);
 
 #define FOCUS   "rgb:bc/57/66"
 #define UNFOCUS "rgb:88/88/88"
@@ -74,6 +77,7 @@ static void (*events[LASTEvent])(XEvent* e) = {
     [MapRequest] = maprequest,
     [ConfigureNotify] = configurenotify,
     [ConfigureRequest] = configurerequest,
+    [EnterNotify] = enternotify,
 };
 
 static void
@@ -168,6 +172,10 @@ add_window(Window w)
         cl->window = w;
         last->next = cl;
     }
+
+    // subscribe to events when the mouse moves to this window such that we can
+    // change the current window
+    XSelectInput(disp, w, EnterWindowMask);
 
     workspace_curr = cl;
 }
@@ -305,6 +313,25 @@ keypress(XEvent* e)
     for (int i = 0; i < (sizeof(keys) / sizeof(*keys)); ++i) {
         if (keys[i].ks == *ks && keys[i].mod == ev.state) {
             keys[i].function(keys[i].arg);
+        }
+    }
+}
+
+static void
+enternotify(XEvent* e)
+{
+    XEnterWindowEvent* ev = &e->xcrossing;
+
+    // when the mouse hovers over the background we don't want to do anything
+    if (ev->window == rootwin) {
+        return;
+    }
+
+    for (Client* cl = workspace_first; cl != NULL; cl = cl->next) {
+        if (cl->window == ev->window) {
+            workspace_curr = cl;
+            update_curr();
+            break;
         }
     }
 }
