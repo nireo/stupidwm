@@ -39,7 +39,7 @@ typedef struct Workspace {
 } Workspace;
 
 static Display* disp;
-static bool quit;
+static bool quit_flag;
 static int main_screen;
 static Window rootwin;
 static int screen_width;
@@ -56,6 +56,7 @@ static void kill_curr();
 static void add_window(Window w);
 static void client_to_workspace(const Arg arg);
 static void change_workspace(const Arg arg);
+static void quit();
 
 // bar related stuff
 static Window bar_window;
@@ -88,6 +89,7 @@ static Keybind keys[] = {
     { MOD | ShiftMask, XK_p, spawn, { .command = dmenu_cmd } },
     { MOD | ShiftMask, XK_q, kill_curr, { NULL } },
     { MOD | ShiftMask, XK_Return, spawn, { .command = term_cmd } },
+    { MOD | ShiftMask, XK_e, quit, { NULL } },
     DESKTOPCHANGE(XK_1, 0)
         DESKTOPCHANGE(XK_2, 1)
             DESKTOPCHANGE(XK_3, 2)
@@ -288,7 +290,7 @@ start(void)
 {
     XEvent event;
 
-    while (!quit && !XNextEvent(disp, &event)) {
+    while (!quit_flag && !XNextEvent(disp, &event)) {
         // handle events we know how to handle
         if (events[event.type]) {
             events[event.type](&event);
@@ -531,6 +533,39 @@ setup_keybinds(void)
     }
 }
 
+static void
+quit()
+{
+    if (quit_flag) {
+        XUngrabKey(disp, AnyKey, AnyModifier, rootwin);
+        XDestroySubwindows(disp, rootwin);
+        fprintf(stdout, "stupidwm: quitting...");
+        XCloseDisplay(disp);
+        die("shutdown");
+    }
+
+    Window root_return, parent;
+    Window* children;
+    int i;
+    unsigned int nchildren;
+    XEvent ev;
+    quit_flag = 1;
+    XQueryTree(disp, rootwin, &root_return, &parent, &children, &nchildren);
+    for (i = 0; i < nchildren; i++) {
+        send_kill_signal(children[i]);
+    }
+
+    while (nchildren > 0) {
+        XQueryTree(disp, rootwin, &root_return, &parent, &children, &nchildren);
+        XNextEvent(disp, &ev);
+        if (events[ev.type])
+            events[ev.type](&ev);
+    }
+
+    XUngrabKey(disp, AnyKey, AnyModifier, rootwin);
+    fprintf(stdout, "stupidwm: quitting\n");
+}
+
 int
 main(int argc, char* argv[])
 {
@@ -547,7 +582,7 @@ main(int argc, char* argv[])
 
     screen_height = XDisplayHeight(disp, main_screen);
     screen_width = XDisplayWidth(disp, main_screen);
-    quit = false;
+    quit_flag = false;
 
     cursor = XCreateFontCursor(disp, XC_left_ptr);
     XDefineCursor(disp, rootwin, cursor);
