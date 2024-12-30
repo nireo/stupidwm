@@ -1,6 +1,7 @@
 #include <X11/X.h>
 #include <X11/Xlib.h>
 #include <X11/cursorfont.h>
+#include <X11/extensions/Xrandr.h>
 #include <X11/keysym.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -8,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <threads.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -38,6 +40,17 @@ typedef struct Workspace {
     Client* curr;
 } Workspace;
 
+typedef struct Monitor {
+    int x, y;
+    int width, height;
+    Window bar_window; // status bar window where the bar will be rendered
+    GC graphics_ctx;   // graphics context for drawing the bar
+    Workspace workspaces[WORKSPACE_COUNT];
+    int curr_workspace;
+    struct Monitor* next;
+    bool primary;
+} Monitor;
+
 static Display* disp;
 static bool quit_flag;
 static int main_screen;
@@ -45,8 +58,8 @@ static Window rootwin;
 static int screen_width;
 static int screen_height;
 static int curr_workspace;
-static Client* workspace_first;
-static Client* workspace_curr;
+static Client* master_client;
+static Client* selected_client;
 static Workspace workspaces[WORKSPACE_COUNT];
 static Cursor cursor;
 static unsigned int focus_color;
@@ -57,6 +70,9 @@ static void add_window(Window w);
 static void client_to_workspace(const Arg arg);
 static void change_workspace(const Arg arg);
 static void quit();
+
+static Monitor* monitors;
+static Monitor* selected_monitor;
 
 // bar related stuff
 static Window bar_window;
@@ -169,22 +185,22 @@ tile_screen(void)
     // 3. there are multiple windows -> count the amount of windows and divide the space evenly
     const int space = 10;
     const int start_y = bar_height + space;
-    if (workspace_first != NULL && workspace_first->next == NULL) {
+    if (master_client != NULL && master_client->next == NULL) {
         // special case there is only a single window
-        XMoveResizeWindow(disp, workspace_first->window, space, start_y, screen_width - 3 * space, screen_height - 3 * space);
-    } else if (workspace_first != NULL && workspace_first->next != NULL) { // multiple windows
+        XMoveResizeWindow(disp, master_client->window, space, start_y, screen_width - 3 * space, screen_height - 3 * space);
+    } else if (master_client != NULL && master_client->next != NULL) { // multiple windows
         const int master_size = 0.55 * screen_width;
-        XMoveResizeWindow(disp, workspace_first->window, space, start_y, master_size, screen_height - 2 * space);
+        XMoveResizeWindow(disp, master_client->window, space, start_y, master_size, screen_height - 2 * space);
         int x = master_size + 3 * space;
         int y = start_y;
         int tile_height = screen_width - master_size - 5 * space;
         int num_windows = 0;
 
-        for (Client* cl = workspace_first->next; cl != NULL; cl = cl->next) {
+        for (Client* cl = master_client->next; cl != NULL; cl = cl->next) {
             ++num_windows;
         }
 
-        for (Client* cl = workspace_first->next; cl != NULL; cl = cl->next) {
+        for (Client* cl = master_client->next; cl != NULL; cl = cl->next) {
             XMoveResizeWindow(disp, cl->window, x, y, tile_height, (screen_height / num_windows) - 2 * space);
             y += screen_height / num_windows;
         }
@@ -194,8 +210,8 @@ tile_screen(void)
 static void
 update_curr(void)
 {
-    for (Client* cl = workspace_first; cl != NULL; cl = cl->next) {
-        if (workspace_curr == cl) {
+    for (Client* cl = master_client; cl != NULL; cl = cl->next) {
+        if (selected_client == cl) {
             XSetWindowBorderWidth(disp, cl->window, 5);
             XSetWindowBorder(disp, cl->window, focus_color);
             XSetInputFocus(disp, cl->window, RevertToParent, CurrentTime);
@@ -216,15 +232,15 @@ die(const char* e)
 static void
 save_state(int idx)
 {
-    workspaces[idx].curr = workspace_curr;
-    workspaces[idx].first = workspace_first;
+    workspaces[idx].curr = selected_client;
+    workspaces[idx].first = master_client;
 }
 
 static void
 update_global(int idx)
 {
-    workspace_first = workspaces[idx].first;
-    workspace_curr = workspaces[idx].curr;
+    master_client = workspaces[idx].first;
+    selected_client = workspaces[idx].curr;
     curr_workspace = idx;
 }
 
@@ -237,15 +253,15 @@ add_window(Window w)
         die("failed calloc");
     }
 
-    if (workspace_first == NULL) {
+    if (master_client == NULL) {
         // there are no existing clients so update them
         cl->next = NULL;
         cl->prev = NULL;
         cl->window = w;
-        workspace_first = cl;
+        master_client = cl;
     } else {
         Client* last;
-        for (last = workspace_first; last->next != NULL; last = last->next)
+        for (last = master_client; last->next != NULL; last = last->next)
             ;
 
         cl->next = NULL;
@@ -258,7 +274,7 @@ add_window(Window w)
     // change the current window
     XSelectInput(disp, w, EnterWindowMask);
 
-    workspace_curr = cl;
+    selected_client = cl;
 }
 
 unsigned long
@@ -301,27 +317,27 @@ start(void)
 static void
 remove_window(Window w)
 {
-    for (Client* cl = workspace_first; cl != NULL; cl = cl->next) {
+    for (Client* cl = master_client; cl != NULL; cl = cl->next) {
         if (cl->window == w) {
             if (cl->prev == NULL && cl->next == NULL) {
-                free(workspace_first);
-                workspace_first = NULL;
-                workspace_curr = NULL;
+                free(master_client);
+                master_client = NULL;
+                selected_client = NULL;
                 return;
             }
 
             if (cl->prev == NULL) {
-                workspace_first = cl->next;
+                master_client = cl->next;
                 cl->next->prev = NULL;
-                workspace_curr = cl->next;
+                selected_client = cl->next;
             } else if (cl->next == NULL) {
                 cl->prev->next = NULL;
                 cl->next->prev = cl->prev;
-                workspace_curr = cl->prev;
+                selected_client = cl->prev;
             } else {
                 cl->prev->next = cl->next;
                 cl->next->prev = cl->prev;
-                workspace_curr = cl->prev;
+                selected_client = cl->prev;
             }
         }
     }
@@ -330,10 +346,10 @@ remove_window(Window w)
 static void
 client_to_workspace(const Arg arg)
 {
-    Client* tmp = workspace_curr;
+    Client* tmp = selected_client;
     int tmp2 = arg.workspace_idx;
 
-    if (arg.workspace_idx == curr_workspace || workspace_curr == NULL)
+    if (arg.workspace_idx == curr_workspace || selected_client == NULL)
         return;
 
     update_global(arg.workspace_idx);
@@ -341,7 +357,7 @@ client_to_workspace(const Arg arg)
     save_state(arg.workspace_idx);
 
     update_global(tmp2);
-    remove_window(workspace_curr->window);
+    remove_window(selected_client->window);
 
     tile_screen();
     update_curr();
@@ -357,9 +373,9 @@ change_workspace(const Arg arg)
     // since the workspaces differ we want to unmap each window that is not currently
     // in the workspace we're switching to. XUnmapWindow hides a given window untill it is
     // brought back using the XMapWindow function
-    if (workspace_first != NULL) {
+    if (master_client != NULL) {
         // we have windows that we need to unwrap
-        for (Client* cl = workspace_first; cl != NULL; cl = cl->next) {
+        for (Client* cl = master_client; cl != NULL; cl = cl->next) {
             XUnmapWindow(disp, cl->window);
         }
     }
@@ -370,9 +386,9 @@ change_workspace(const Arg arg)
     update_global(arg.workspace_idx); // update the global state with the current workspace
 
     // map all of the windows that belong to the workspace that we switched to.
-    if (workspace_first != NULL) {
+    if (master_client != NULL) {
         // we have windows that we need to unwrap
-        for (Client* cl = workspace_first; cl != NULL; cl = cl->next) {
+        for (Client* cl = master_client; cl != NULL; cl = cl->next) {
             XMapWindow(disp, cl->window);
         }
     }
@@ -386,7 +402,7 @@ static void
 maprequest(XEvent* e)
 {
     XMapRequestEvent* event = &e->xmaprequest;
-    for (Client* cl = workspace_first; cl != NULL; cl = cl->next) {
+    for (Client* cl = master_client; cl != NULL; cl = cl->next) {
         if (event->window == cl->window) {
             XMapWindow(disp, event->window);
             return;
@@ -461,9 +477,9 @@ enternotify(XEvent* e)
         return;
     }
 
-    for (Client* cl = workspace_first; cl != NULL; cl = cl->next) {
+    for (Client* cl = master_client; cl != NULL; cl = cl->next) {
         if (cl->window == ev->window) {
-            workspace_curr = cl;
+            selected_client = cl;
             update_curr();
             break;
         }
@@ -478,7 +494,7 @@ destroynotify(XEvent* e)
 
     // ensure that the window actually exists. this might not be necessary but nice to check
     // that we don't do anything unexpected if the window isn't managed.
-    for (Client* cl = workspace_first; cl != NULL; cl = cl->next) {
+    for (Client* cl = master_client; cl != NULL; cl = cl->next) {
         if (dwe->window == cl->window) {
             found_window = true;
             break;
@@ -509,16 +525,16 @@ send_kill_signal(Window w)
 static void
 kill_curr(void)
 {
-    if (workspace_curr != NULL) {
+    if (selected_client != NULL) {
         XEvent ke;
         ke.type = ClientMessage;
-        ke.xclient.window = workspace_curr->window;
+        ke.xclient.window = selected_client->window;
         ke.xclient.message_type = XInternAtom(disp, "WM_PROTOCOLS", True);
         ke.xclient.format = 32;
         ke.xclient.data.l[0] = XInternAtom(disp, "WM_DELETE_WINDOW", True);
         ke.xclient.data.l[1] = CurrentTime;
-        XSendEvent(disp, workspace_curr->window, 0, NoEventMask, &ke);
-        send_kill_signal(workspace_curr->window);
+        XSendEvent(disp, selected_client->window, 0, NoEventMask, &ke);
+        send_kill_signal(selected_client->window);
     }
 }
 
@@ -564,6 +580,108 @@ quit()
 
     XUngrabKey(disp, AnyKey, AnyModifier, rootwin);
     fprintf(stdout, "stupidwm: quitting\n");
+}
+
+static void
+swap_curr_with_master()
+{
+    if (master_client != NULL && selected_client != master_client && selected_client != NULL) {
+        Window tmp = master_client->window;
+        master_client->window = selected_client->window;
+        selected_client->window = tmp;
+        selected_client = master_client;
+
+        tile_screen();
+        update_curr();
+    }
+}
+
+static Monitor*
+create_monitor(int x, int y, int width, int height, bool primary)
+{
+    Monitor* m = calloc(1, sizeof(Monitor));
+    if (!m) {
+        die("failed to allocate monitor");
+    }
+
+    // init properties
+    m->x = x;
+    m->y = y;
+    m->width = width;
+    m->height = height;
+    m->primary = primary;
+    m->curr_workspace = 0;
+    m->next = NULL;
+
+    // init workspaces
+    for (int i = 0; i < WORKSPACE_COUNT; ++i) {
+        m->workspaces[i].first = NULL;
+        m->workspaces[i].curr = NULL;
+    }
+
+    XSetWindowAttributes wa = {
+        .override_redirect = 1,
+        .background_pixel = unfocus_color,
+        .event_mask = ExposureMask,
+    };
+
+    m->bar_window = XCreateWindow(disp, rootwin,
+        x, y, width, bar_height, 0,
+        DefaultDepth(disp, main_screen),
+        CopyFromParent, DefaultVisual(disp, main_screen),
+        CWOverrideRedirect | CWBackPixel | CWEventMask, &wa);
+
+    m->graphics_ctx = XCreateGC(disp, m->bar_window, 0, NULL);
+    XMapWindow(disp, m->bar_window);
+    return m;
+}
+
+static void
+setup_monitors(void)
+{
+
+    monitors = NULL;
+    selected_monitor = NULL;
+
+    int num_monitors;
+    XRRScreenResources* res = XRRGetScreenResources(disp, rootwin);
+    XRROutputInfo* output_info;
+    XRRCrtcInfo* crtc_info;
+
+    for (int i = 0; i < res->noutput; i++) {
+        output_info = XRRGetOutputInfo(disp, res, res->outputs[i]);
+
+        if (output_info->connection == RR_Connected && output_info->crtc) {
+            crtc_info = XRRGetCrtcInfo(disp, res, output_info->crtc);
+
+            Monitor* m = create_monitor(
+                crtc_info->x,
+                crtc_info->y,
+                crtc_info->width,
+                crtc_info->height,
+                i == 0);
+
+            if (!monitors) {
+                monitors = m;
+                selected_monitor = m;
+            } else {
+                Monitor* last;
+                for (last = monitors; last->next; last = last->next)
+                    ;
+                last->next = m;
+            }
+
+            XRRFreeCrtcInfo(crtc_info);
+        }
+        XRRFreeOutputInfo(output_info);
+    }
+
+    XRRFreeScreenResources(res);
+
+    if (!monitors) {
+        monitors = create_monitor(0, 0, screen_width, screen_height, true);
+        selected_monitor = monitors;
+    }
 }
 
 int
