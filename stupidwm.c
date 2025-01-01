@@ -208,6 +208,36 @@ tile_screen(void)
 }
 
 static void
+tile_monitor(Monitor* m)
+{
+    // there are three different cases
+    // 1. there are no windows -> do nothing
+    // 2. there is a single window -> add space around the only window
+    // 3. there are multiple windows -> count the amount of windows and divide the space evenly
+    const int space = 10;
+    const int start_y = bar_height + space;
+    Client* master = m->workspaces[m->curr_workspace].first;
+    if (master != NULL && master->next == NULL) {
+        XMoveResizeWindow(disp, master_client->window, space, start_y, screen_width - 3 * space, screen_height - 3 * space);
+    } else if (master != NULL && master->next != NULL) {
+        const int master_size = 0.55 * m->width;
+        XMoveResizeWindow(disp, master->window, m->x + space, m->y + start_y, master_size, m->height - 2 * space);
+        int x = m->x + master_size + 3 * space;
+        int y = m->y + start_y;
+        int tile_width = m->width - master_size - 5 * space;
+        int nwindows = 0;
+
+        for (Client* cl = master->next; cl != NULL; cl = cl->next)
+            ++nwindows;
+
+        for (Client* cl = master->next; cl != NULL; cl = cl->next) {
+            XMoveResizeWindow(disp, cl->window, x, y, tile_width, (screen_height / nwindows) - 2 * space);
+            y += screen_height / nwindows;
+        }
+    }
+}
+
+static void
 update_curr(void)
 {
     for (Client* cl = master_client; cl != NULL; cl = cl->next) {
@@ -219,6 +249,34 @@ update_curr(void)
         } else {
             XSetWindowBorder(disp, cl->window, unfocus_color);
         }
+    }
+}
+
+static Monitor*
+monitor_from_window(Window w)
+{
+    if (w == rootwin) {
+        return selected_monitor;
+    }
+
+    int x, y;
+    Window child;
+    for (Monitor* m = monitors; m; m = m->next) {
+        if (x >= m->x && x < m->x + m->width &&
+            y >= m->y && y < m->y + m->height)
+            return m;
+    }
+
+    return selected_monitor;
+}
+
+static void
+focus_monitor(Monitor* m)
+{
+    if (m && m != selected_monitor) {
+        selected_monitor = m;
+        update_curr();
+        draw_bar();
     }
 }
 
