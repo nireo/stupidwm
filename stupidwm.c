@@ -1,7 +1,9 @@
 #include <X11/X.h>
+#include <X11/Xft/Xft.h>
 #include <X11/Xlib.h>
 #include <X11/cursorfont.h>
 #include <X11/extensions/Xrandr.h>
+#include <X11/extensions/Xrender.h>
 #include <X11/keysym.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -51,6 +53,13 @@ typedef struct Monitor {
     bool primary;
 } Monitor;
 
+static void
+die(const char* e)
+{
+    fprintf(stdout, "stupid: %s\n", e);
+    exit(1);
+}
+
 static Display* disp;
 static bool quit_flag;
 static int main_screen;
@@ -64,6 +73,11 @@ static Workspace workspaces[WORKSPACE_COUNT];
 static Cursor cursor;
 static unsigned int focus_color;
 static unsigned int unfocus_color;
+static XftFont* font;
+static XftDraw* xft;
+static XftColor xft_focus_color;
+static XftColor xft_unfocus_color;
+
 static void spawn(const Arg arg);
 static void kill_curr();
 static void add_window(Window w);
@@ -118,6 +132,8 @@ static Keybind keys[] = {
                                         DESKTOPCHANGE(XK_0, 9)
 };
 
+#define FONT "Hack Nerd Font Mono:size=12"
+
 static void (*events[LASTEvent])(XEvent* e) = {
     [KeyPress] = keypress,
     [DestroyNotify] = destroynotify,
@@ -143,8 +159,44 @@ setup_bar(void)
         CopyFromParent, DefaultVisual(disp, main_screen),
         CWOverrideRedirect | CWBackPixel | CWEventMask, &wa);
 
+    font = XftFontOpenName(disp, main_screen, FONT);
+    if (!font) {
+        die("failed to load font");
+    }
+
+    xft = XftDrawCreate(disp, bar_window, XDefaultVisual(disp, main_screen), XDefaultColormap(disp, main_screen));
+    if (!xft) {
+        die("failed to create xft draw context");
+    }
+
+    XftColorAllocName(disp, XDefaultVisual(disp, main_screen),
+        XDefaultColormap(disp, main_screen),
+        FOCUS, &xft_focus_color);
+    XftColorAllocName(disp, XDefaultVisual(disp, main_screen),
+        XDefaultColormap(disp, main_screen),
+        UNFOCUS, &xft_unfocus_color);
+
     graphics_ctx = XCreateGC(disp, bar_window, 0, NULL);
     XMapWindow(disp, bar_window);
+}
+
+static void
+cleanup_font(void)
+{
+    if (xft) {
+        XftDrawDestroy(xft);
+        xft = NULL;
+    }
+
+    if (font) {
+        XftFontClose(disp, font);
+        font = NULL;
+    }
+
+    XftColorFree(disp, DefaultVisual(disp, main_screen),
+        DefaultColormap(disp, main_screen), &xft_focus_color);
+    XftColorFree(disp, DefaultVisual(disp, main_screen),
+        DefaultColormap(disp, main_screen), &xft_unfocus_color);
 }
 
 static void
@@ -155,13 +207,18 @@ draw_bar(void)
 
     int x = 0;
     int tag_width = 20;
+    XGlyphInfo extents;
 
     for (int i = 0; i < WORKSPACE_COUNT; i++) {
+        XftTextExtentsUtf8(disp, font, (XftChar8*)tags[i], strlen(tags[i]), &extents);
+        tag_width = extents.xOff + 10;
+
         XSetForeground(disp, graphics_ctx, i == curr_workspace ? focus_color : unfocus_color);
         XFillRectangle(disp, bar_window, graphics_ctx, x, 0, tag_width, bar_height);
 
-        XSetForeground(disp, graphics_ctx, i == curr_workspace ? unfocus_color : focus_color);
-        XDrawString(disp, bar_window, graphics_ctx, x + 5, bar_height - 5, tags[i], strlen(tags[i]));
+        XftDrawStringUtf8(xft, i == curr_workspace ? &xft_unfocus_color : &xft_focus_color,
+            font, x + 5, bar_height - (bar_height - font->ascent) / 2,
+            (XftChar8*)tags[i], strlen(tags[i]));
 
         x += tag_width;
     }
@@ -278,13 +335,6 @@ focus_monitor(Monitor* m)
         update_curr();
         draw_bar();
     }
-}
-
-static void
-die(const char* e)
-{
-    fprintf(stdout, "stupid: %s\n", e);
-    exit(1);
 }
 
 static void
@@ -611,6 +661,7 @@ static void
 quit()
 {
     if (quit_flag) {
+        cleanup_font();
         XUngrabKey(disp, AnyKey, AnyModifier, rootwin);
         XDestroySubwindows(disp, rootwin);
         fprintf(stdout, "stupidwm: quitting...");
