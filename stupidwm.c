@@ -95,8 +95,7 @@ static int bar_height = 20;
 static const char* tags[] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "0" };
 
 // x events
-static void
-configurenotify(XEvent* e);
+static void configurenotify(XEvent* e);
 static void configurerequest(XEvent* e);
 static void keypress(XEvent* e);
 static void destroynotify(XEvent* e);
@@ -104,8 +103,8 @@ static void maprequest(XEvent* e);
 static void enternotify(XEvent* e);
 static void expose(XEvent* e);
 
-#define FOCUS   "rgb:bc/57/66"
-#define UNFOCUS "rgb:88/88/88"
+#define FOCUS   "#f9f5d7"
+#define UNFOCUS "#282828"
 #define MOD     Mod4Mask
 
 const char* dmenu_cmd[] = { "dmenu_run", NULL };
