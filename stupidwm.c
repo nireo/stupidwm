@@ -85,6 +85,11 @@ static void client_to_workspace(const Arg arg);
 static void change_workspace(const Arg arg);
 static void quit();
 
+static void move_left();
+static void move_up();
+static void move_down();
+static void move_right();
+
 static Monitor* monitors;
 static Monitor* selected_monitor;
 
@@ -114,6 +119,8 @@ const char* term_cmd[] = { "kitty", NULL };
     { MOD, K, change_workspace, { .workspace_idx = N } }, \
         { MOD | ShiftMask, K, client_to_workspace, { .workspace_idx = N } },
 
+#define MOVEMENT(K, F) { MOD, K, F, { NULL } },
+
 static Keybind keys[] = {
     { MOD | ShiftMask, XK_p, spawn, { .command = dmenu_cmd } },
     { MOD | ShiftMask, XK_q, kill_curr, { NULL } },
@@ -129,9 +136,13 @@ static Keybind keys[] = {
                                 DESKTOPCHANGE(XK_8, 7)
                                     DESKTOPCHANGE(XK_9, 8)
                                         DESKTOPCHANGE(XK_0, 9)
+                                            MOVEMENT(XK_h, move_left)
+                                                MOVEMENT(XK_l, move_right)
+                                                    MOVEMENT(XK_k, move_up)
+                                                        MOVEMENT(XK_j, move_down)
 };
 
-#define FONT "Hack Nerd Font Mono:size=12"
+#define FONT "Iosevka Comfy:size=13"
 
 static void (*events[LASTEvent])(XEvent* e) = {
     [KeyPress] = keypress,
@@ -177,6 +188,71 @@ setup_bar(void)
 
     graphics_ctx = XCreateGC(disp, bar_window, 0, NULL);
     XMapWindow(disp, bar_window);
+}
+
+static void
+update_curr(void)
+{
+    for (Client* cl = master_client; cl != NULL; cl = cl->next) {
+        if (selected_client == cl) {
+            XSetWindowBorderWidth(disp, cl->window, 5);
+            XSetWindowBorder(disp, cl->window, focus_color);
+            XSetInputFocus(disp, cl->window, RevertToParent, CurrentTime);
+            XRaiseWindow(disp, cl->window);
+        } else {
+            XSetWindowBorder(disp, cl->window, unfocus_color);
+        }
+    }
+}
+
+static void
+move_left(void)
+{
+    if (!selected_client || !master_client)
+        return;
+
+    // Moving left always focuses the master window
+    selected_client = master_client;
+    update_curr();
+}
+
+static void
+move_right(void)
+{
+    if (!selected_client || !master_client)
+        return;
+
+    // If we're on master, move to the first stacked window
+    if (selected_client == master_client && master_client->next) {
+        selected_client = master_client->next;
+    }
+    update_curr();
+}
+
+static void
+move_up(void)
+{
+    if (!selected_client || !master_client)
+        return;
+
+    // If we're not on master and have a previous window
+    if (selected_client != master_client && selected_client->prev) {
+        selected_client = selected_client->prev;
+    }
+    update_curr();
+}
+
+static void
+move_down(void)
+{
+    if (!selected_client || !master_client)
+        return;
+
+    // If we have a next window
+    if (selected_client->next) {
+        selected_client = selected_client->next;
+    }
+    update_curr();
 }
 
 static void
@@ -289,21 +365,6 @@ tile_monitor(Monitor* m)
         for (Client* cl = master->next; cl != NULL; cl = cl->next) {
             XMoveResizeWindow(disp, cl->window, x, y, tile_width, (screen_height / nwindows) - 2 * space);
             y += screen_height / nwindows;
-        }
-    }
-}
-
-static void
-update_curr(void)
-{
-    for (Client* cl = master_client; cl != NULL; cl = cl->next) {
-        if (selected_client == cl) {
-            XSetWindowBorderWidth(disp, cl->window, 5);
-            XSetWindowBorder(disp, cl->window, focus_color);
-            XSetInputFocus(disp, cl->window, RevertToParent, CurrentTime);
-            XRaiseWindow(disp, cl->window);
-        } else {
-            XSetWindowBorder(disp, cl->window, unfocus_color);
         }
     }
 }
