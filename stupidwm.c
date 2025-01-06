@@ -45,9 +45,9 @@ typedef struct Workspace {
 typedef struct Monitor {
     int x, y;
     int width, height;
+    int screen;
     Window bar_window; // status bar window where the bar will be rendered
     GC graphics_ctx;   // graphics context for drawing the bar
-    Workspace workspaces[WORKSPACE_COUNT];
     int curr_workspace;
     struct Monitor* next;
     bool primary;
@@ -60,16 +60,13 @@ die(const char* e)
     exit(1);
 }
 
+#define SEL_MONITOR_WS (workspaces[selected_monitor->curr_workspace])
+
 static Display* disp;
 static bool quit_flag;
-static int main_screen;
+static int main_screen; // this is consistent between monitors
 static Window rootwin;
-static int screen_width;
-static int screen_height;
-static int curr_workspace;
-static Client* master_client;
-static Client* selected_client;
-static Workspace workspaces[WORKSPACE_COUNT];
+static Workspace workspaces[WORKSPACE_COUNT]; // this is global between monitors
 static Cursor cursor;
 static unsigned int focus_color;
 static unsigned int unfocus_color;
@@ -164,7 +161,7 @@ setup_bar(void)
     };
 
     bar_window = XCreateWindow(disp, rootwin,
-        0, 0, screen_width, bar_height, 0,
+        0, 0, selected_monitor->width, bar_height, 0,
         DefaultDepth(disp, main_screen),
         CopyFromParent, DefaultVisual(disp, main_screen),
         CWOverrideRedirect | CWBackPixel | CWEventMask, &wa);
@@ -193,8 +190,8 @@ setup_bar(void)
 static void
 update_curr(void)
 {
-    for (Client* cl = master_client; cl != NULL; cl = cl->next) {
-        if (selected_client == cl) {
+    for (Client* cl = SEL_MONITOR_WS.first; cl != NULL; cl = cl->next) {
+        if (SEL_MONITOR_WS.curr == cl) {
             XSetWindowBorderWidth(disp, cl->window, 5);
             XSetWindowBorder(disp, cl->window, focus_color);
             XSetInputFocus(disp, cl->window, RevertToParent, CurrentTime);
@@ -208,23 +205,22 @@ update_curr(void)
 static void
 move_left(void)
 {
-    if (!selected_client || !master_client)
+    if (!SEL_MONITOR_WS.curr || !SEL_MONITOR_WS.first)
         return;
 
-    // Moving left always focuses the master window
-    selected_client = master_client;
+    SEL_MONITOR_WS.curr = SEL_MONITOR_WS.first;
     update_curr();
 }
 
 static void
 move_right(void)
 {
-    if (!selected_client || !master_client)
+    if (!SEL_MONITOR_WS.curr || !SEL_MONITOR_WS.first)
         return;
 
     // If we're on master, move to the first stacked window
-    if (selected_client == master_client && master_client->next) {
-        selected_client = master_client->next;
+    if (SEL_MONITOR_WS.curr == SEL_MONITOR_WS.first && SEL_MONITOR_WS.first->next) {
+        SEL_MONITOR_WS.curr = SEL_MONITOR_WS.first->next;
     }
     update_curr();
 }
@@ -232,12 +228,12 @@ move_right(void)
 static void
 move_up(void)
 {
-    if (!selected_client || !master_client)
+    if (!SEL_MONITOR_WS.curr || !SEL_MONITOR_WS.first)
         return;
 
     // If we're not on master and have a previous window
-    if (selected_client != master_client && selected_client->prev) {
-        selected_client = selected_client->prev;
+    if (SEL_MONITOR_WS.curr != SEL_MONITOR_WS.first && SEL_MONITOR_WS.curr->prev) {
+        SEL_MONITOR_WS.curr = SEL_MONITOR_WS.curr->prev;
     }
     update_curr();
 }
@@ -245,12 +241,12 @@ move_up(void)
 static void
 move_down(void)
 {
-    if (!selected_client || !master_client)
+    if (!SEL_MONITOR_WS.curr || !SEL_MONITOR_WS.first)
         return;
 
     // If we have a next window
-    if (selected_client->next) {
-        selected_client = selected_client->next;
+    if (SEL_MONITOR_WS.curr->next) {
+        SEL_MONITOR_WS.curr = SEL_MONITOR_WS.curr->next;
     }
     update_curr();
 }
@@ -278,7 +274,7 @@ static void
 draw_bar(void)
 {
     XSetForeground(disp, graphics_ctx, unfocus_color);
-    XFillRectangle(disp, bar_window, graphics_ctx, 0, 0, screen_width, bar_height);
+    XFillRectangle(disp, bar_window, graphics_ctx, 0, 0, selected_monitor->width, bar_height);
 
     int x = 0;
     int tag_width = 20;
@@ -288,10 +284,10 @@ draw_bar(void)
         XftTextExtentsUtf8(disp, font, (XftChar8*)tags[i], strlen(tags[i]), &extents);
         tag_width = extents.xOff + 10;
 
-        XSetForeground(disp, graphics_ctx, i == curr_workspace ? focus_color : unfocus_color);
+        XSetForeground(disp, graphics_ctx, i == selected_monitor->curr_workspace ? focus_color : unfocus_color);
         XFillRectangle(disp, bar_window, graphics_ctx, x, 0, tag_width, bar_height);
 
-        XftDrawStringUtf8(xft, i == curr_workspace ? &xft_unfocus_color : &xft_focus_color,
+        XftDrawStringUtf8(xft, i == selected_monitor->curr_workspace ? &xft_unfocus_color : &xft_focus_color,
             font, x + 5, bar_height - (bar_height - font->ascent) / 2,
             (XftChar8*)tags[i], strlen(tags[i]));
 
@@ -317,24 +313,24 @@ tile_screen(void)
     // 3. there are multiple windows -> count the amount of windows and divide the space evenly
     const int space = 10;
     const int start_y = bar_height + space;
-    if (master_client != NULL && master_client->next == NULL) {
+    if (SEL_MONITOR_WS.first != NULL && SEL_MONITOR_WS.first->next == NULL) {
         // special case there is only a single window
-        XMoveResizeWindow(disp, master_client->window, space, start_y, screen_width - 3 * space, screen_height - 3 * space);
-    } else if (master_client != NULL && master_client->next != NULL) { // multiple windows
-        const int master_size = 0.55 * screen_width;
-        XMoveResizeWindow(disp, master_client->window, space, start_y, master_size, screen_height - 2 * space);
+        XMoveResizeWindow(disp, SEL_MONITOR_WS.first->window, space, start_y, selected_monitor->width - 3 * space, selected_monitor->height - 3 * space);
+    } else if (SEL_MONITOR_WS.first != NULL && SEL_MONITOR_WS.first->next != NULL) { // multiple windows
+        const int master_size = 0.55 * selected_monitor->width;
+        XMoveResizeWindow(disp, SEL_MONITOR_WS.first->window, space, start_y, master_size, selected_monitor->height - 2 * space);
         int x = master_size + 3 * space;
         int y = start_y;
-        int tile_height = screen_width - master_size - 5 * space;
+        int tile_height = selected_monitor->width - master_size - 5 * space;
         int num_windows = 0;
 
-        for (Client* cl = master_client->next; cl != NULL; cl = cl->next) {
+        for (Client* cl = SEL_MONITOR_WS.first->next; cl != NULL; cl = cl->next) {
             ++num_windows;
         }
 
-        for (Client* cl = master_client->next; cl != NULL; cl = cl->next) {
-            XMoveResizeWindow(disp, cl->window, x, y, tile_height, (screen_height / num_windows) - 2 * space);
-            y += screen_height / num_windows;
+        for (Client* cl = SEL_MONITOR_WS.first->next; cl != NULL; cl = cl->next) {
+            XMoveResizeWindow(disp, cl->window, x, y, tile_height, (selected_monitor->height / num_windows) - 2 * space);
+            y += selected_monitor->height / num_windows;
         }
     }
 }
@@ -348,9 +344,9 @@ tile_monitor(Monitor* m)
     // 3. there are multiple windows -> count the amount of windows and divide the space evenly
     const int space = 10;
     const int start_y = bar_height + space;
-    Client* master = m->workspaces[m->curr_workspace].first;
+    Client* master = workspaces[m->curr_workspace].first;
     if (master != NULL && master->next == NULL) {
-        XMoveResizeWindow(disp, master_client->window, space, start_y, screen_width - 3 * space, screen_height - 3 * space);
+        XMoveResizeWindow(disp, SEL_MONITOR_WS.first->window, space, start_y, selected_monitor->width - 3 * space, selected_monitor->height - 3 * space);
     } else if (master != NULL && master->next != NULL) {
         const int master_size = 0.55 * m->width;
         XMoveResizeWindow(disp, master->window, m->x + space, m->y + start_y, master_size, m->height - 2 * space);
@@ -363,8 +359,8 @@ tile_monitor(Monitor* m)
             ++nwindows;
 
         for (Client* cl = master->next; cl != NULL; cl = cl->next) {
-            XMoveResizeWindow(disp, cl->window, x, y, tile_width, (screen_height / nwindows) - 2 * space);
-            y += screen_height / nwindows;
+            XMoveResizeWindow(disp, cl->window, x, y, tile_width, (selected_monitor->height / nwindows) - 2 * space);
+            y += selected_monitor->height / nwindows;
         }
     }
 }
@@ -398,18 +394,28 @@ focus_monitor(Monitor* m)
 }
 
 static void
+focus_next_monitor()
+{
+    if (!selected_monitor || !selected_monitor->next) {
+        return;
+    }
+
+    focus_monitor(selected_monitor->next);
+}
+
+static void
 save_state(int idx)
 {
-    workspaces[idx].curr = selected_client;
-    workspaces[idx].first = master_client;
+    workspaces[idx].curr = SEL_MONITOR_WS.curr;
+    workspaces[idx].first = SEL_MONITOR_WS.first;
 }
 
 static void
 update_global(int idx)
 {
-    master_client = workspaces[idx].first;
-    selected_client = workspaces[idx].curr;
-    curr_workspace = idx;
+    SEL_MONITOR_WS.first = workspaces[idx].first;
+    SEL_MONITOR_WS.curr = workspaces[idx].curr;
+    selected_monitor->curr_workspace = idx;
 }
 
 // add window allocates a client and updates the global values
@@ -421,15 +427,15 @@ add_window(Window w)
         die("failed calloc");
     }
 
-    if (master_client == NULL) {
+    if (SEL_MONITOR_WS.first == NULL) {
         // there are no existing clients so update them
         cl->next = NULL;
         cl->prev = NULL;
         cl->window = w;
-        master_client = cl;
+        SEL_MONITOR_WS.first = cl;
     } else {
         Client* last;
-        for (last = master_client; last->next != NULL; last = last->next)
+        for (last = SEL_MONITOR_WS.first; last->next != NULL; last = last->next)
             ;
 
         cl->next = NULL;
@@ -442,7 +448,7 @@ add_window(Window w)
     // change the current window
     XSelectInput(disp, w, EnterWindowMask);
 
-    selected_client = cl;
+    SEL_MONITOR_WS.curr = cl;
 }
 
 unsigned long
@@ -485,27 +491,27 @@ start(void)
 static void
 remove_window(Window w)
 {
-    for (Client* cl = master_client; cl != NULL; cl = cl->next) {
+    for (Client* cl = SEL_MONITOR_WS.first; cl != NULL; cl = cl->next) {
         if (cl->window == w) {
             if (cl->prev == NULL && cl->next == NULL) {
-                free(master_client);
-                master_client = NULL;
-                selected_client = NULL;
+                free(SEL_MONITOR_WS.first);
+                SEL_MONITOR_WS.first = NULL;
+                SEL_MONITOR_WS.curr = NULL;
                 return;
             }
 
             if (cl->prev == NULL) {
-                master_client = cl->next;
+                SEL_MONITOR_WS.first = cl->next;
                 cl->next->prev = NULL;
-                selected_client = cl->next;
+                SEL_MONITOR_WS.curr = cl->next;
             } else if (cl->next == NULL) {
                 cl->prev->next = NULL;
                 cl->next->prev = cl->prev;
-                selected_client = cl->prev;
+                SEL_MONITOR_WS.curr = cl->prev;
             } else {
                 cl->prev->next = cl->next;
                 cl->next->prev = cl->prev;
-                selected_client = cl->prev;
+                SEL_MONITOR_WS.curr = cl->prev;
             }
         }
     }
@@ -514,10 +520,10 @@ remove_window(Window w)
 static void
 client_to_workspace(const Arg arg)
 {
-    Client* tmp = selected_client;
+    Client* tmp = SEL_MONITOR_WS.curr;
     int tmp2 = arg.workspace_idx;
 
-    if (arg.workspace_idx == curr_workspace || selected_client == NULL)
+    if (arg.workspace_idx == selected_monitor->curr_workspace || SEL_MONITOR_WS.curr == NULL)
         return;
 
     update_global(arg.workspace_idx);
@@ -525,7 +531,7 @@ client_to_workspace(const Arg arg)
     save_state(arg.workspace_idx);
 
     update_global(tmp2);
-    remove_window(selected_client->window);
+    remove_window(SEL_MONITOR_WS.curr->window);
 
     tile_screen();
     update_curr();
@@ -535,28 +541,28 @@ static void
 change_workspace(const Arg arg)
 {
     // don't do anything if we're already in the correct workspace
-    if (arg.workspace_idx == curr_workspace)
+    if (arg.workspace_idx == selected_monitor->curr_workspace)
         return;
 
     // since the workspaces differ we want to unmap each window that is not currently
     // in the workspace we're switching to. XUnmapWindow hides a given window untill it is
     // brought back using the XMapWindow function
-    if (master_client != NULL) {
+    if (SEL_MONITOR_WS.first != NULL) {
         // we have windows that we need to unwrap
-        for (Client* cl = master_client; cl != NULL; cl = cl->next) {
+        for (Client* cl = SEL_MONITOR_WS.first; cl != NULL; cl = cl->next) {
             XUnmapWindow(disp, cl->window);
         }
     }
 
     // we need to save the state that the workspace is in such that when we switch back
     // between workspaces the position of the windows stays the same.
-    save_state(curr_workspace);
+    save_state(selected_monitor->curr_workspace);
     update_global(arg.workspace_idx); // update the global state with the current workspace
 
     // map all of the windows that belong to the workspace that we switched to.
-    if (master_client != NULL) {
+    if (SEL_MONITOR_WS.first != NULL) {
         // we have windows that we need to unwrap
-        for (Client* cl = master_client; cl != NULL; cl = cl->next) {
+        for (Client* cl = SEL_MONITOR_WS.first; cl != NULL; cl = cl->next) {
             XMapWindow(disp, cl->window);
         }
     }
@@ -570,7 +576,7 @@ static void
 maprequest(XEvent* e)
 {
     XMapRequestEvent* event = &e->xmaprequest;
-    for (Client* cl = master_client; cl != NULL; cl = cl->next) {
+    for (Client* cl = SEL_MONITOR_WS.first; cl != NULL; cl = cl->next) {
         if (event->window == cl->window) {
             XMapWindow(disp, event->window);
             return;
@@ -645,9 +651,9 @@ enternotify(XEvent* e)
         return;
     }
 
-    for (Client* cl = master_client; cl != NULL; cl = cl->next) {
+    for (Client* cl = SEL_MONITOR_WS.first; cl != NULL; cl = cl->next) {
         if (cl->window == ev->window) {
-            selected_client = cl;
+            SEL_MONITOR_WS.curr = cl;
             update_curr();
             break;
         }
@@ -662,7 +668,7 @@ destroynotify(XEvent* e)
 
     // ensure that the window actually exists. this might not be necessary but nice to check
     // that we don't do anything unexpected if the window isn't managed.
-    for (Client* cl = master_client; cl != NULL; cl = cl->next) {
+    for (Client* cl = SEL_MONITOR_WS.first; cl != NULL; cl = cl->next) {
         if (dwe->window == cl->window) {
             found_window = true;
             break;
@@ -693,16 +699,16 @@ send_kill_signal(Window w)
 static void
 kill_curr(void)
 {
-    if (selected_client != NULL) {
+    if (SEL_MONITOR_WS.curr != NULL) {
         XEvent ke;
         ke.type = ClientMessage;
-        ke.xclient.window = selected_client->window;
+        ke.xclient.window = SEL_MONITOR_WS.curr->window;
         ke.xclient.message_type = XInternAtom(disp, "WM_PROTOCOLS", True);
         ke.xclient.format = 32;
         ke.xclient.data.l[0] = XInternAtom(disp, "WM_DELETE_WINDOW", True);
         ke.xclient.data.l[1] = CurrentTime;
-        XSendEvent(disp, selected_client->window, 0, NoEventMask, &ke);
-        send_kill_signal(selected_client->window);
+        XSendEvent(disp, SEL_MONITOR_WS.curr->window, 0, NoEventMask, &ke);
+        send_kill_signal(SEL_MONITOR_WS.curr->window);
     }
 }
 
@@ -754,11 +760,11 @@ quit()
 static void
 swap_curr_with_master()
 {
-    if (master_client != NULL && selected_client != master_client && selected_client != NULL) {
-        Window tmp = master_client->window;
-        master_client->window = selected_client->window;
-        selected_client->window = tmp;
-        selected_client = master_client;
+    if (SEL_MONITOR_WS.first != NULL && SEL_MONITOR_WS.curr != SEL_MONITOR_WS.first && SEL_MONITOR_WS.curr != NULL) {
+        Window tmp = SEL_MONITOR_WS.first->window;
+        SEL_MONITOR_WS.first->window = SEL_MONITOR_WS.curr->window;
+        SEL_MONITOR_WS.curr->window = tmp;
+        SEL_MONITOR_WS.curr = SEL_MONITOR_WS.first;
 
         tile_screen();
         update_curr();
@@ -781,12 +787,6 @@ create_monitor(int x, int y, int width, int height, bool primary)
     m->primary = primary;
     m->curr_workspace = 0;
     m->next = NULL;
-
-    // init workspaces
-    for (int i = 0; i < WORKSPACE_COUNT; ++i) {
-        m->workspaces[i].first = NULL;
-        m->workspaces[i].curr = NULL;
-    }
 
     XSetWindowAttributes wa = {
         .override_redirect = 1,
@@ -848,7 +848,7 @@ setup_monitors(void)
     XRRFreeScreenResources(res);
 
     if (!monitors) {
-        monitors = create_monitor(0, 0, screen_width, screen_height, true);
+        monitors = create_monitor(0, 0, selected_monitor->width, selected_monitor->height, true);
         selected_monitor = monitors;
     }
 }
@@ -867,8 +867,6 @@ main(int argc, char* argv[])
     main_screen = XDefaultScreen(disp);
     rootwin = XRootWindow(disp, main_screen);
 
-    screen_height = XDisplayHeight(disp, main_screen);
-    screen_width = XDisplayWidth(disp, main_screen);
     quit_flag = false;
 
     cursor = XCreateFontCursor(disp, XC_left_ptr);
@@ -877,6 +875,7 @@ main(int argc, char* argv[])
     focus_color = get_color(FOCUS);
     unfocus_color = get_color(UNFOCUS);
 
+    setup_monitors();
     setup_keybinds();
     setup_bar();
 
