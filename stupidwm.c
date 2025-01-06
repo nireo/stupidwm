@@ -48,6 +48,7 @@ typedef struct Monitor {
     int screen;
     Window bar_window; // status bar window where the bar will be rendered
     GC graphics_ctx;   // graphics context for drawing the bar
+    XftDraw* xft;
     int curr_workspace;
     struct Monitor* next;
     bool primary;
@@ -90,9 +91,6 @@ static void move_right();
 static Monitor* monitors;
 static Monitor* selected_monitor;
 
-// bar related stuff
-static Window bar_window;
-static GC graphics_ctx;
 static int bar_height = 20;
 static const char* tags[] = { "1", "2", "3", "4", "5", "6", "7", "8", "9", "0" };
 
@@ -154,27 +152,15 @@ static void (*events[LASTEvent])(XEvent* e) = {
 static void
 setup_bar(void)
 {
-    XSetWindowAttributes wa = {
-        .override_redirect = 1,
-        .background_pixel = unfocus_color,
-        .event_mask = ExposureMask,
-    };
-
-    bar_window = XCreateWindow(disp, rootwin,
-        0, 0, selected_monitor->width, bar_height, 0,
-        DefaultDepth(disp, main_screen),
-        CopyFromParent, DefaultVisual(disp, main_screen),
-        CWOverrideRedirect | CWBackPixel | CWEventMask, &wa);
-
     font = XftFontOpenName(disp, main_screen, FONT);
     if (!font) {
         die("failed to load font");
     }
 
-    xft = XftDrawCreate(disp, bar_window, XDefaultVisual(disp, main_screen), XDefaultColormap(disp, main_screen));
-    if (!xft) {
-        die("failed to create xft draw context");
-    }
+    // xft = XftDrawCreate(disp, bar_window, XDefaultVisual(disp, main_screen), XDefaultColormap(disp, main_screen));
+    // if (!xft) {
+    //     die("failed to create xft draw context");
+    // }
 
     XftColorAllocName(disp, XDefaultVisual(disp, main_screen),
         XDefaultColormap(disp, main_screen),
@@ -182,9 +168,31 @@ setup_bar(void)
     XftColorAllocName(disp, XDefaultVisual(disp, main_screen),
         XDefaultColormap(disp, main_screen),
         UNFOCUS, &xft_unfocus_color);
+}
 
-    graphics_ctx = XCreateGC(disp, bar_window, 0, NULL);
-    XMapWindow(disp, bar_window);
+static void
+draw_monitor_bar(Monitor* m)
+{
+    XSetForeground(disp, m->graphics_ctx, unfocus_color);
+    XFillRectangle(disp, m->bar_window, m->graphics_ctx, 0, 0, m->width, bar_height);
+
+    int x = 0;
+    int tag_width = 20;
+    XGlyphInfo extents;
+
+    for (int i = 0; i < WORKSPACE_COUNT; i++) {
+        XftTextExtentsUtf8(disp, font, (XftChar8*)tags[i], strlen(tags[i]), &extents);
+        tag_width = extents.xOff + 10;
+
+        XSetForeground(disp, m->graphics_ctx, i == m->curr_workspace ? focus_color : unfocus_color);
+        XFillRectangle(disp, m->bar_window, m->graphics_ctx, x, 0, tag_width, bar_height);
+
+        XftDrawStringUtf8(m->xft, i == m->curr_workspace ? &xft_unfocus_color : &xft_focus_color,
+            font, x + 5, bar_height - (bar_height - font->ascent) / 2,
+            (XftChar8*)tags[i], strlen(tags[i]));
+
+        x += tag_width;
+    }
 }
 
 static void
@@ -254,9 +262,11 @@ move_down(void)
 static void
 cleanup_font(void)
 {
-    if (xft) {
-        XftDrawDestroy(xft);
-        xft = NULL;
+    for (Monitor* m = monitors; m; m = m->next) {
+        if (m->xft) {
+            XftDrawDestroy(m->xft);
+            m->xft = NULL;
+        }
     }
 
     if (font) {
@@ -273,25 +283,8 @@ cleanup_font(void)
 static void
 draw_bar(void)
 {
-    XSetForeground(disp, graphics_ctx, unfocus_color);
-    XFillRectangle(disp, bar_window, graphics_ctx, 0, 0, selected_monitor->width, bar_height);
-
-    int x = 0;
-    int tag_width = 20;
-    XGlyphInfo extents;
-
-    for (int i = 0; i < WORKSPACE_COUNT; i++) {
-        XftTextExtentsUtf8(disp, font, (XftChar8*)tags[i], strlen(tags[i]), &extents);
-        tag_width = extents.xOff + 10;
-
-        XSetForeground(disp, graphics_ctx, i == selected_monitor->curr_workspace ? focus_color : unfocus_color);
-        XFillRectangle(disp, bar_window, graphics_ctx, x, 0, tag_width, bar_height);
-
-        XftDrawStringUtf8(xft, i == selected_monitor->curr_workspace ? &xft_unfocus_color : &xft_focus_color,
-            font, x + 5, bar_height - (bar_height - font->ascent) / 2,
-            (XftChar8*)tags[i], strlen(tags[i]));
-
-        x += tag_width;
+    for (Monitor* m = monitors; m; m = m->next) {
+        draw_monitor_bar(m);
     }
 }
 
@@ -299,8 +292,11 @@ static void
 expose(XEvent* e)
 {
     XExposeEvent* ev = &e->xexpose;
-    if (ev->window == bar_window && ev->count == 0) {
-        draw_bar();
+    for (Monitor* m = monitors; m; m = m->next) {
+        if (ev->window == m->bar_window && ev->count == 0) {
+            draw_monitor_bar(m);
+            break;
+        }
     }
 }
 
@@ -374,6 +370,8 @@ monitor_from_window(Window w)
 
     int x, y;
     Window child;
+    XTranslateCoordinates(disp, w, rootwin, 0, 0, &x, &y, &child);
+
     for (Monitor* m = monitors; m; m = m->next) {
         if (x >= m->x && x < m->x + m->width &&
             y >= m->y && y < m->y + m->height)
@@ -387,9 +385,11 @@ static void
 focus_monitor(Monitor* m)
 {
     if (m && m != selected_monitor) {
+        Monitor* old = selected_monitor;
         selected_monitor = m;
         update_curr();
-        draw_bar();
+        draw_monitor_bar(old);
+        draw_monitor_bar(m);
     }
 }
 
@@ -422,6 +422,11 @@ update_global(int idx)
 static void
 add_window(Window w)
 {
+    Monitor* m = monitor_from_window(w);
+    if (m != selected_monitor) {
+        focus_monitor(m);
+    }
+
     Client* cl = calloc(1, sizeof(Client));
     if (cl == NULL) {
         die("failed calloc");
@@ -465,7 +470,7 @@ get_color(const char* color)
 }
 
 static void
-sigchld(int unused)
+sigchld(int _unused)
 {
     // setup signal handling for child processes
     if (signal(SIGCHLD, sigchld) == SIG_ERR) {
@@ -641,10 +646,24 @@ keypress(XEvent* e)
     }
 }
 
+static Monitor*
+monitor_from_coords(int x, int y)
+{
+    for (Monitor* m = monitors; m; m = m->next) {
+        if (x >= m->x && x < m->x + m->width &&
+            y >= m->y && y < m->y + m->height)
+            return m;
+    }
+    return selected_monitor;
+}
+
 static void
 enternotify(XEvent* e)
 {
     XEnterWindowEvent* ev = &e->xcrossing;
+
+    Monitor* m = monitor_from_coords(ev->x_root, ev->y_root);
+    focus_monitor(m);
 
     // when the mouse hovers over the background we don't want to do anything
     if (ev->window == rootwin) {
@@ -801,6 +820,11 @@ create_monitor(int x, int y, int width, int height, bool primary)
         CWOverrideRedirect | CWBackPixel | CWEventMask, &wa);
 
     m->graphics_ctx = XCreateGC(disp, m->bar_window, 0, NULL);
+    m->xft = XftDrawCreate(disp, m->bar_window, XDefaultVisual(disp, main_screen), XDefaultColormap(disp, main_screen));
+    if (!m->xft) {
+        die("failed to create xft draw context for monitor");
+    }
+
     XMapWindow(disp, m->bar_window);
     return m;
 }
@@ -816,6 +840,8 @@ setup_monitors(void)
     XRRScreenResources* res = XRRGetScreenResources(disp, rootwin);
     XRROutputInfo* output_info;
     XRRCrtcInfo* crtc_info;
+
+    printf("number of outputs: %d\n", res->noutput);
 
     for (int i = 0; i < res->noutput; i++) {
         output_info = XRRGetOutputInfo(disp, res, res->outputs[i]);

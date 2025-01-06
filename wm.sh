@@ -6,11 +6,7 @@ make build
 
 XEPHYR=$(command -v Xephyr) # Absolute path of Xephyr's bin
 xinit ./xinitrc -- \
-    "$XEPHYR" \
-        :100 \
-        -ac \
-        -screen 1380x720\
-        -host-cursor
+    "$XEPHYR" +xinerama -screen 1920x1080 -screen 1920x1080 -screen 1920x1080 -ac :1 -host-cursor
 
 
 
